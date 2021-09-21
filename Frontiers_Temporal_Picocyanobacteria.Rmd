@@ -1,0 +1,2223 @@
+---
+title: "R script for Metabarcoding reveals lacustrine picocyanobacteria respond to environmental change through adaptive community structuring"
+author: "Lena Schallenberg"
+date: "19/09/2021"
+output: html_document
+---
+
+DADA2 pre-processing
+
+```{r}
+library(dada2)
+library(ggplot2)
+library(knitr)
+
+pathF <- ".../Plate2_trimmed/forward"
+list.files(pathF)
+pathR <- ".../Plate2_trimmed/reverse"
+list.files(pathR)
+
+fastqFs <- sort(list.files(pathF, pattern="fastq"))
+fastqRs <- sort(list.files(pathR, pattern="fastq"))
+if(length(fastqFs) != length(fastqRs)) stop("Forward and reverse files do not match.")
+
+fastqFs1 <- sort(list.files(pathF, pattern="fastq", full.names=TRUE))
+fastqRs1 <- sort(list.files(pathR, pattern="fastq", full.names=TRUE))
+
+ qualityplotF_sep <- plotQualityProfile(fastqFs1, aggregate = FALSE) + 
+   scale_x_continuous(breaks=seq(0,300,10)) + 
+   scale_y_continuous(breaks=seq(0,40,2)) +
+   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ 
+ qualityplotF_sep
+ 
+ # Forward quality
+ qualityplotF_agg <- plotQualityProfile(fastqFs1, aggregate = TRUE)+ 
+  scale_x_continuous(breaks=seq(0,300,10)) + 
+  scale_y_continuous(breaks=seq(0,40,2)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+qualityplotF_agg
+
+# Reverse quality
+qualityplotR_agg <- plotQualityProfile(fastqRs1, aggregate = TRUE) + 
+  scale_x_continuous(breaks=seq(0,300,10)) + 
+  scale_y_continuous(breaks=seq(0,40,2)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+qualityplotR_agg
+
+filtpathF <- file.path(pathF, "filtered")
+filtpathR <- file.path(pathR, "filtered")
+
+out <- filterAndTrim(fwd=file.path(pathF, fastqFs), filt=file.path(filtpathF, fastqFs),
+                     rev=file.path(pathR, fastqRs), filt.rev=file.path(filtpathR, fastqRs),
+                     truncLen=c(230,228), maxEE=c(2,4), truncQ=2, maxN=0, rm.phix=TRUE,
+                     compress=TRUE, verbose=TRUE, multithread=TRUE)
+kable(out) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+filtpathF <- "...Plate2_trimmed/forward/filtered"
+filtpathR <- "...Plate2_trimmed/reverse/filtered"
+
+# Rename
+filtFs <- list.files(filtpathF, pattern="fastq", full.names = TRUE)
+filtRs <- list.files(filtpathR, pattern="fastq", full.names = TRUE)
+sample.names <- sapply(strsplit(basename(filtFs), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+sample.namesR <- sapply(strsplit(basename(filtRs), "_"), `[`, 1) # Assumes filename = samplename_XXX.fastq.gz
+if(!identical(sample.names, sample.namesR)) stop("Forward and reverse files do not match.")
+names(filtFs) <- sample.names
+names(filtRs) <- sample.namesR
+
+# Error profiles
+errF <- learnErrors(filtFs, nbases = 1e8, multithread=TRUE, verbose = TRUE)
+errR <- learnErrors(filtRs, nbases = 1e8, multithread=TRUE, verbose = TRUE)
+
+# Check error profiles
+errors_f <- plotErrors(errF, nominalQ=TRUE)
+errors_f 
+errors_r <- plotErrors(errR, nominalQ=TRUE)
+errors_r
+
+# Check convergence
+dada2:::checkConvergence(errF)
+
+# Dereplicate
+derepF <- derepFastq(filtFs, verbose=TRUE)
+derepR <- derepFastq(filtRs, verbose=TRUE)
+
+# Sample inference
+dadaF.pseudo <- dada(derepF, err=errF, multithread=TRUE, pool="pseudo")
+dadaR.pseudo <- dada(derepR, err=errR, multithread=TRUE, pool="pseudo")
+
+dada2.names <- list.files(filtpathF, pattern="fastq")
+
+asv.values = NULL
+for (i in 1:length(dada2.names)) {
+  value <- nrow(dadaF.pseudo[[i]][["clustering"]])
+  asv.values = rbind(asv.values, value)
+}
+
+# Merge forward and reverse reads
+mergers <- mergePairs(dadaF.pseudo, derepF, dadaR.pseudo, derepR, maxMismatch = 1, minOverlap = 10, verbose=TRUE)
+seqtab2019b <- makeSequenceTable(mergers)
+save(seqtab2019b, file = "seqtab2019b.Rdata")
+saveRDS(seqtab2019b, "seqtab2019b.rds")
+write.csv(seqtab2019b, file = "seqtab2019b.csv")
+
+# Check length distribution
+trimtable <- as.data.frame(table(nchar(getSequences(seqtab2019b))))
+colnames(trimtable) <- c("Length (bp)", "Frequency")
+kable(trimtable)
+
+################################ LOAD ALL PLATES NOW ########################################################################
+#Loading all plates and looking at lengths
+
+load("seqtab2018.Rdata")
+load("seqtabplate1.Rdata")
+load("seqtabplate2a.Rdata")
+
+seqtab2019a <- readRDS("seqtab1.rds")
+seqtab2019b <- readRDS("seqtab2019b.rds")
+# I don't have a working .rds so use the .rdata file
+seqtab2018 = load("seqtab2018.Rdata")
+
+### have issues because some row names are the same in differnt plates (e.g. controls and H20). 
+# Need to rename them. Manually checked which row numbers needed changing 
+
+#2018 table
+mata <- as.data.frame(seqtabplate2)
+rownames(mata)[23]<-"Blanka"
+rownames(mata)[67]<-"H20c"
+rownames(mata)[68]<-"H20d"
+rownames(mata)[94]<-"negc"
+table2018 = as.matrix(mata)
+
+# 2019a
+mate <- as.data.frame(seqtab2019a)
+rownames(mate)[24]<-"H20e"
+table2019a = as.matrix(mate)
+
+# 2019b
+mat <- as.data.frame(seqtab2019b)
+rownames(mat)[3]<-"H20a"
+table2019b = as.matrix(mat)
+
+#Now merge these tables toegther using the mergeSequenceTables command. This will compare
+# the sequence variants in each table and merge those that are the same. 
+dada.merged <- mergeSequenceTables(table2018, table2019a, table2019b)
+
+# Trim
+trimtable <- as.data.frame(table(nchar(getSequences(dada.merged))))
+colnames(trimtable) <- c("Length (bp)", "Frequency")
+kable(trimtable)
+
+dada.merged.trimmed <- dada.merged[,nchar(colnames(dada.merged)) %in% seq(379,408)]
+
+#check the trimming
+trimtable <- as.data.frame(table(nchar(getSequences(dada.merged.trimmed))))
+colnames(trimtable) <- c("Length (bp)", "Frequency")
+kable(trimtable)
+
+# Remove Chimeras
+dada.all.nochimera <- removeBimeraDenovo(dada.merged.trimmed, method="consensus", multithread=TRUE)
+
+#check the trimming and chimera removal
+trimtable <- as.data.frame(table(nchar(getSequences(dada.all.nochimera))))
+colnames(trimtable) <- c("Length (bp)", "Frequency")
+kable(trimtable)
+
+# Assign taxonomy
+
+pico.nochimera.tax <- assignTaxonomy(dada.all.nochimera, "silva_nr_v138_train_set.fa", multithread=TRUE)
+
+# Create phyloseq object
+
+library(phyloseq)
+
+phyloseqGTDB_Dada2OTU <- phyloseq(otu_table(dada.all.nochimera, taxa_are_rows=FALSE), 
+                              tax_table(pico.nochimera.tax1))
+
+ntaxa(phyloseqGTDB_Dada2OTU) 
+nsamples(phyloseqGTDB_Dada2OTU) 
+
+write.csv(tax_table(phyloseq), file="FinalPhyloseqTAXA.csv")
+write.csv(otu_table(phyloseq), file="FinalPhyloseqOTU.csv")
+
+```
+
+Analysis
+
+```{r}
+library(data.table)
+library(plyr)
+library(phyloseq)
+library(ggplot2)
+library(scales)
+library(grid)
+library(reshape2) #necessary for colsplit
+library(tidyverse)
+library(vegan)
+library(genefilter)
+library(ggrepel)
+library(knitr)
+library(dplyr)
+library(RVAideMemoire)
+library(RColorBrewer)
+library(devtools)
+library(lares)
+library(colorspace)
+
+
+otu_table = fread("FinalPhyloseqOTU.csv") 
+otu_table = as.data.frame(otu_table)
+row.names(otu_table) = otu_table$"V1"
+otu_table$`V1`=NULL 
+
+tax_table2 = fread("FinalPhyloseqTAXA.csv", header = TRUE) 
+tax_table2 = as.data.frame(tax_table2)
+row.names(tax_table2) = tax_table2$"V1" 
+tax_table2$`V1`=NULL
+
+sam_data = fread("temporal_sample1.data.csv", header = TRUE)
+sam_data = as.data.frame(sam_data)
+row.names(sam_data) = sam_data$"V1" 
+sam_data$`V1`=NULL 
+
+ps_otu_table = otu_table(otu_table, taxa_are_rows=FALSE)
+ps_tax = tax_table(tax_table2)
+rownames(ps_tax)=rownames(tax_table2)
+colnames(ps_tax)=colnames(tax_table2)
+ps_map = sample_data(sam_data)
+rownames(ps_map)=sam_data$'SampleID' 
+physeq = phyloseq(ps_otu_table,ps_tax,ps_map)
+
+# Clean taxonomy
+tax.clean <- data.frame(tax_table(physeq))
+for (i in 1:6){ tax.clean[,i] <- as.character(tax.clean[,i])}
+tax.clean[is.na(tax.clean)] <- ""
+for (i in 1:nrow(tax.clean)){
+  if (tax.clean[i,2] == ""){
+    kingdom <- paste("Unclassified_Kingdom_", tax.clean[i,1], sep = "")
+    tax.clean[i, 2:6] <- kingdom
+  } else if (tax.clean[i,3] == ""){
+    phylum <- paste("Unclassified_Phylum_", tax.clean[i,2], sep = "")
+    tax.clean[i, 3:6] <- phylum
+  } else if (tax.clean[i,4] == ""){
+    class <- paste("Unclassified_Class_", tax.clean[i,3], sep = "")
+    tax.clean[i, 4:6] <- class
+  } else if (tax.clean[i,5] == ""){
+    order <- paste("Unclassified_Order_", tax.clean[i,4], sep = "")
+    tax.clean[i, 5:6] <- order
+  } else if (tax.clean[i,6] == ""){
+    tax.clean$Genus[i] <- paste("Unclassified_Family",tax.clean$Family[i], sep = "_")
+  } 
+}
+tax_table(physeq) <- as.matrix(tax.clean)
+
+## Make strain ID's  unique
+tax = tax_table(physeq)
+tax_table = as.data.frame(tax)
+tax_table$Genus <- sub('[.]', '_', make.names(tax_table$Genus, unique=TRUE))
+tax.table2 = as.data.frame(tax_table)
+tax = tax_table(tax_table)
+
+rownames(tax)=rownames(tax.table2)
+colnames(tax)=colnames(tax.table2)
+
+physeq1 = phyloseq(ps_otu_table, tax, ps_map)
+ntaxa (physeq1)
+nsamples(physeq1)
+any(taxa_sums(physeq1) == 0)
+physeq1 = prune_taxa(taxa_sums(physeq1) > 0, physeq1)
+physeq1 = prune_samples(sample_sums(physeq1) > 0, physeq1)
+nsamples(physeq1)
+
+# Select only Temporal study
+temporal = subset_samples(physeq1, Study == "Temporal"| Study == "Control")
+any(taxa_sums(temporal) == 0)
+temporal = prune_taxa(taxa_sums(temporal) > 0, temporal)
+ntaxa(temporal)
+# 13996
+temporal = prune_samples(sample_sums(temporal) > 0, temporal)
+nsamples(temporal)
+# 264
+
+################ Check read depth before subsetting to cyanos
+
+# plot = ggrare(temporal, step = 50, color = "Lake",
+#               plot = TRUE, parallel = FALSE, se = FALSE) 
+
+sdt = data.table(as(sample_data(temporal), "data.frame"),
+                 TotalReads = sample_sums(temporal), keep.rownames = TRUE)
+
+write.csv(sdt, file = "Raw_Reads.csv")
+
+#setnames(sdt, "rn", "SampleID")
+pSeqDepth = ggplot(sdt, aes(TotalReads)) + 
+  geom_histogram() + 
+  ggtitle("Pre-filtering") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) 
+
+pSeqDepth
+# 500x350
+
+##### Selecting only cyanobacteria
+
+cyan1 = subset_taxa(temporal, Phylum == "Cyanobacteria")
+cyan2 = subset_taxa(temporal, Class == "Oxyphotobacteria")
+any(taxa_sums(cyan1) == 0)
+ntaxa(cyan1)
+
+##### Removing chloroplasts
+cyan3 = subset_taxa(cyan1, Order != "Chloroplast")
+any(taxa_sums(cyan3) == 0)
+mystudy1 = prune_taxa(taxa_sums(cyan3) > 0, cyan3)
+ntaxa(cyan3)
+nsamples(cyan3)
+
+sdt1 = data.table(as(sample_data(cyan3), "data.frame"),
+                 TotalReads = sample_sums(cyan3), keep.rownames = TRUE)
+
+write.csv(sdt1, file = "Raw_Reads_Cyano3.csv")
+
+pSeqDepth = ggplot(sdt1, aes(TotalReads)) + 
+  geom_histogram() + 
+  ggtitle("Only Cyanobacteria") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) 
+
+pSeqDepth
+# 500 x 350
+
+############################# Remove reads found in blanks and remove blanks #############################
+
+Controls = subset_samples(cyan3 ,  Study == "Control")
+Controls = filter_taxa(Controls, function(x) sum(x) > 0, TRUE)
+sample_sums(Controls)
+# Check out the genus of comntaminants
+plot_bar(Controls, "SampleID", fill = "Order")
+
+control_max <- apply(as.data.frame(as.matrix(t(otu_table(Controls)))), 1, max)
+control_max_vec <- as.vector(control_max)
+
+control1 = as(otu_table(cyan3), "matrix")
+controlsdf = as.data.frame(control1)
+controlsdf[,1:length(controlsdf)] <- sweep(controlsdf[,1:length(controlsdf)],2,control_max_vec)
+controlsdf <- replace(controlsdf, controlsdf < 0, 0)
+
+minusblanks <- phyloseq(otu_table(controlsdf, taxa_are_rows=FALSE),
+                        sample_data(cyan3), 
+                        tax_table(cyan3))
+
+any(sample_sums(minusblanks) == 0)
+minusblanks = prune_samples(sample_sums(minusblanks) > 0, minusblanks)
+ntaxa(minusblanks)
+nsamples(minusblanks)
+
+####################### Remove Te Anau samples not part of this study ################################
+
+tempcyanobio = subset_samples(minusblanks, Study == "Temporal")
+tempcyanobio = subset_samples(tempcyanobio, Lake != "Te Anau")
+any(taxa_sums(tempcyanobio) == 0)
+spattempcyanobiospattempcyanobio = prune_taxa(taxa_sums(tempcyanobio) > 0, tempcyanobio)
+ntaxa(tempcyanobio)
+tempcyanobio = prune_samples(sample_sums(tempcyanobio) > 0, tempcyanobio)
+nsamples(tempcyanobio)
+
+sdt2 = data.table(as(sample_data(tempcyanobio), "data.frame"),
+                 TotalReads = sample_sums(tempcyanobio), keep.rownames = TRUE)
+
+write.csv(sdt2, file = "Raw_Reads_tempcyanobio.csv")
+
+## Just picos
+temppico = subset_taxa(tempcyanobio, Order == "Synechococcales")
+any(taxa_sums(temppico) == 0)
+temppico = prune_taxa(taxa_sums(temppico) > 0, temppico)
+any(sample_sums(temppico) == 0)
+temppico = prune_samples(sample_sums(temppico) > 0, temppico)
+ntaxa(temppico)
+nsamples(temppico)
+
+plot_heatmap(temppico, "PCoA", "jaccard", "Lake", "Genus", sample.order = "Lake")
+
+sdt3 = data.table(as(sample_data(temppico), "data.frame"),
+                 TotalReads = sample_sums(temppico), keep.rownames = TRUE)
+
+write.csv(sdt3, file = "Raw_Reads_temppico.csv")
+
+############################ FILTER ###################
+
+# Include only taxa with more than or equal to 5 reads (on average) in at least 2 samples
+tempcyanofilt <- phyloseq::genefilter_sample(tempcyanobio, filterfun_sample(function(x) x >= 5), 
+                                             A = 2)
+tempcyanofilt <- prune_taxa(tempcyanofilt, tempcyanobio)
+
+any(taxa_sums(tempcyanofilt) == 0)
+any(sample_sums(tempcyanofilt) <= 0)
+tempcyanofilt1 <- prune_samples(sample_sums(tempcyanofilt) >= 0, tempcyanofilt)
+ntaxa(tempcyanofilt1)
+nsamples(tempcyanofilt1)
+
+sdt4 = data.table(as(sample_data(tempcyanofilt1), "data.frame"),
+                 TotalReads = sample_sums(tempcyanofilt1), keep.rownames = TRUE)
+
+write.csv(sdt4, file = "Raw_Reads_tempcyanofilt1.csv")
+
+pSeqDepth = ggplot(sdt4, aes(TotalReads)) + 
+  geom_histogram() + 
+  ggtitle("Post-filtering") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) 
+
+pSeqDepth
+# 500 x 350
+
+
+################### check replicate samples cluster together before merging
+test = subset_samples(tempcyanofilt1, Lake == "Wanaka")
+any(taxa_sums(test) == 0)
+test = prune_taxa(taxa_sums(test) > 0, test)
+
+GP.ord=ordinate(test, "NMDS", "bray", binary = FALSE) 
+synNMDS=plot_ordination(test, GP.ord, type="x.SampleID",  color="Rep") # label = "Rep",
+synNMDS  + geom_point(size=4) + ggtitle("PCoA Wanaka picos")+theme_bw() 
+
+## Picos before rarefying
+fr = subset_taxa(tempcyanofilt1, Order == "Synechococcales")
+any(taxa_sums(fr) == 0)
+fr = prune_taxa(taxa_sums(fr) > 0, fr)
+ntaxa(fr)
+nsamples(fr)
+
+sdt5 = data.table(as(sample_data(fr), "data.frame"),
+                 TotalReads = sample_sums(fr), keep.rownames = TRUE)
+
+write.csv(sdt5, file = "/Raw_Reads_picosafterFiltering.csv")
+
+################## Merge triplicate samples #######################
+
+sampledata = merge_samples(tempcyanofilt1, "Rep", fun = mean)
+tempcyanofiltmerge = merge_samples(tempcyanofilt1, "Rep", fun = sum)
+# fix sample data because it has been averaged
+write.csv(sample_data(sampledata), file="TempCyanoMergedToFix.csv")
+temp_merg_sam = fread("TempCyanoMergedFIXED.csv", header = TRUE)
+head(temp_merg_sam)
+row.names(temp_merg_sam)=temp_merg_sam$'V1' 
+
+dupW_data = sample_data(temp_merg_sam)
+head(dupW_data)
+row.names(dupW_data)=dupW_data$'SampleID' # Making row names the Sample ID's
+head(dupW_data)
+
+# Make new merged phyloseq
+otuW <- otu_table(tempcyanofiltmerge, taxa_are_rows = T)  # OTU table in our phyloseq object
+taxW <- tax_table(tempcyanofiltmerge)  # Taxonomy Table in our phyloseq object
+#taxE = as.data.frame(taxE)
+TempCyanoFixedMerged <- merge_phyloseq(otuW, taxW, dupW_data) 
+
+ntaxa(TempCyanoFixedMerged)
+nsamples(TempCyanoFixedMerged)
+
+# MERGED PICOCYANOBACTERIA
+picob4rare = subset_taxa(TempCyanoFixedMerged, Order == "Synechococcales" | Order== "Thermosynechococcales")
+any(taxa_sums(picob4rare) == 0)
+picob4rare = prune_taxa(taxa_sums(picob4rare) > 0, picob4rare)
+any(sample_sums(picob4rare) == 1)
+picob4rare = prune_samples(sample_sums(picob4rare) > 1, picob4rare)
+
+ntaxa(picob4rare)
+nsamples(picob4rare)
+write.csv(otu_table(picob4rare), file="B4RareTempPICOFixedMerged_OTU.csv")
+
+
+###################### GGRARE FUNCTION ##################################
+### From https://rdrr.io/github/gauravsk/ranacapa/api/ ####
+
+ggrare <- function(physeq_object, step = 10, label = NULL, color = NULL, plot = TRUE, parallel = FALSE, se = TRUE) {
+  
+  x <- methods::as(phyloseq::otu_table(physeq_object), "matrix")
+  if (phyloseq::taxa_are_rows(physeq_object)) { x <- t(x) }
+  
+  ## This script is adapted from vegan `rarecurve` function
+  tot <- rowSums(x)
+  S <- rowSums(x > 0)
+  nr <- nrow(x)
+  
+  rarefun <- function(i) {
+    cat(paste("rarefying sample", rownames(x)[i]), sep = "\n")
+    n <- seq(1, tot[i], by = step)
+    if (n[length(n)] != tot[i]) {
+      n <- c(n, tot[i])
+    }
+    y <- vegan::rarefy(x[i, ,drop = FALSE], n, se = se)
+    if (nrow(y) != 1) {
+      rownames(y) <- c(".S", ".se")
+      return(data.frame(t(y), Size = n, Sample = rownames(x)[i]))
+    } else {
+      return(data.frame(.S = y[1, ], Size = n, Sample = rownames(x)[i]))
+    }
+  }
+  if (parallel) {
+    out <- parallel::mclapply(seq_len(nr), rarefun, mc.preschedule = FALSE)
+  } else {
+    out <- lapply(seq_len(nr), rarefun)
+  }
+  df <- do.call(rbind, out)
+  
+  # Get sample data
+  if (!is.null(phyloseq::sample_data(physeq_object, FALSE))) {
+    sdf <- methods::as(phyloseq::sample_data(physeq_object), "data.frame")
+    sdf$Sample <- rownames(sdf)
+    data <- merge(df, sdf, by = "Sample")
+    labels <- data.frame(x = tot, y = S, Sample = rownames(x))
+    labels <- merge(labels, sdf, by = "Sample")
+  }
+  
+  # Add, any custom-supplied plot-mapped variables
+  if ( length(color) > 1 ) {
+    data$color <- color
+    names(data)[names(data) == "color"] <- deparse(substitute(color))
+    color <- deparse(substitute(color))
+  }
+  
+  if ( length(label) > 1 ) {
+    labels$label <- label
+    names(labels)[names(labels) == "label"] <- deparse(substitute(label))
+    label <- deparse(substitute(label))
+  }
+  
+  p <- ggplot2::ggplot(data = data,
+                       ggplot2::aes_string(x = "Size",
+                                           y = ".S",
+                                           group = "Sample",
+                                           color = color)) 
+  
+  p <- p + ggplot2::geom_line(size = 0.5)                             
+  
+  p <- p + ggplot2::labs(x = "Sequence Sample Size", y = "Species Richness")
+  
+  if (!is.null(label)) {
+    p <- p + ggplot2::geom_text(data = labels,
+                                ggplot2::aes_string(x = "x",
+                                                    y = "y",
+                                                    label = label,
+                                                    color = color),
+                                size = 2, hjust = 0)
+  }
+  
+  p <- p + ggplot2::geom_line()
+  if (se) { ## add standard error if available
+    p <- p +
+      ggplot2::geom_ribbon(ggplot2::aes_string(ymin = ".S - .se",
+                                               ymax = ".S + .se",
+                                               color = NULL,
+                                               fill = color),
+                           alpha = 0.2)
+  }
+  if (plot) {
+    plot(p)
+  }
+  invisible(p)
+}
+
+######################################  RAREFYING  ###################################################
+
+
+rare = ggrare(TempCyanoFixedMerged, step = 50, color = "Lake",
+              plot = TRUE, parallel = FALSE, se = FALSE) 
+rare + theme_bw() + scale_color_manual(name="Lake",values=c( "firebrick3", "coral4",
+                                                             "darkorange", "#508578", "#3C5488FF"
+))
+
+raretempcyanofilt=rarefy_even_depth(TempCyanoFixedMerged, sample.size = 4000, rngseed=FALSE, replace=F, trimOTUs = TRUE, verbose = TRUE)
+# 24 samples lost at 4000, 12 OTU's lost
+
+rareafter = ggrare(raretempcyanofilt, step = 50, color = "Lake", 
+                   plot = TRUE, parallel = FALSE, se = FALSE)
+
+rareafter + theme_bw() + scale_color_manual(name="Lake",values=c( "firebrick3", "coral4",
+                                                              "darkorange", "#508578", "#3C5488FF"))
+
+############# Add abundances into merged temporal sample data ###################
+## ******* ADD ANYTHING NEW TO SAMPLE DATA HERE!! *********
+
+#write.csv(sample_data(raretempcyanofilt), file="raretempcyanofilt_ToFix.csv")
+raretempcyanofilt1 = fread("raretempcyanofilt_FixedNEW.csv", header = TRUE)
+head(raretempcyanofilt1)
+row.names(raretempcyanofilt1)=raretempcyanofilt1$'SampleID' 
+
+dup_data = sample_data(raretempcyanofilt1)
+head(dup_data)
+row.names(dup_data)=dup_data$'SampleID' # Making row names the Sample ID's
+head(dup_data)
+
+# Make new merged phyloseq
+otu <- otu_table(raretempcyanofilt, taxa_are_rows = T)  # OTU table in our phyloseq object
+tax <- tax_table(raretempcyanofilt)  # Taxonomy Table in our phyloseq object
+#taxE = as.data.frame(taxE)
+raretempcyanofilt1 <- merge_phyloseq(otu, tax, dup_data) 
+
+ntaxa(raretempcyanofilt1)
+nsamples(raretempcyanofilt1)
+
+###### MERGED RAREFIED PICOS
+
+temppicofilt = subset_taxa(raretempcyanofilt1, Order == "Synechococcales")
+any(taxa_sums(temppicofilt) == 0)
+temppicofilt = prune_taxa(taxa_sums(temppicofilt) > 0, temppicofilt)
+ntaxa(temppicofilt)
+nsamples(temppicofilt)
+plot_heatmap(temppicofilt, "PCoA", "jaccard", "Lake", "Genus", sample.order = "Lake")
+
+# make column of Lake + Depth
+sample_data(temppicofilt)$LakeDepth <- paste(sample_data(temppicofilt)$Lake, sample_data(temppicofilt)$Depth)
+
+######## diversity  after rarefying
+
+plot_richness(temppicofilt, "LakeDepth", measures="InvSimpson") + 
+  geom_point(aes(color = LakeDepth), size = 1.5) +
+  scale_x_discrete(name = "LakeDepth", limits = c("Wanaka Epi", "Wanaka Hyp", "Wakatipu Epi", "Wakatipu Hyp", 
+                                             "Hayes Epi", "Hayes Hyp", "Tomahawk Epi","Ellesmere Epi"),
+                   labels = c("Wanaka Epi", "Wanaka Hyp", "Wakatipu Epi", "Wakatipu Hyp", 
+                              "Hayes Epi", "Hayes Hyp", "Tomahawk Epi","Ellesmere Epi")) +
+  geom_boxplot(aes(color = LakeDepth, fill = after_scale(desaturate(lighten(color, .3), .3))), size = 0.7) +
+  scale_color_manual(values = boxes3) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +   theme_bw()
+
+
+El <- subset_samples(temppicofilt, LakeDepth == "Ellesmere Epi")
+el2 <- filter_taxa(el2, function(x) sum(x) > 0, TRUE)
+estimate_richness(el2, measures="Shannon")
+
+wa <- subset_samples(temppicofilt, LakeDepth == "Wanaka Epi")
+wa2 <- filter_taxa(wa, function(x) sum(x) > 0, TRUE)
+estimate_richness(wa2, measures="Shannon")
+
+wa <- subset_samples(temppicofilt, LakeDepth == "Wanaka Hyp")
+wa2 <- filter_taxa(wa, function(x) sum(x) > 0, TRUE)
+estimate_richness(wa2, measures="Shannon")
+
+wk <- subset_samples(temppicofilt, LakeDepth == "Wakatipu Epi")
+wk2 <- filter_taxa(wk, function(x) sum(x) > 0, TRUE)
+estimate_richness(wk2, measures="Shannon")
+
+wk <- subset_samples(temppicofilt, LakeDepth == "Wakatipu Hyp")
+wk2 <- filter_taxa(wk, function(x) sum(x) > 0, TRUE)
+estimate_richness(wk2, measures="Observed")
+
+ha <- subset_samples(temppicofilt, LakeDepth == "Hayes Epi")
+ha2 <- filter_taxa(ha, function(x) sum(x) > 0, TRUE)
+estimate_richness(ha2, measures="Shannon")
+
+ha <- subset_samples(temppicofilt, LakeDepth == "Hayes Hyp")
+ha2 <- filter_taxa(ha, function(x) sum(x) > 0, TRUE)
+estimate_richness(ha2, measures="Shannon")
+
+ta <- subset_samples(temppicofilt, Lake == "Tomahawk")
+ta2 <- filter_taxa(ta, function(x) sum(x) > 0, TRUE)
+estimate_richness(ta2, measures="Shannon")
+
+############## CHECK DISTRIBUTION
+
+sample_sum_df <- data.frame(sum = sample_sums(temppicofilt))
+
+ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color="Black", binwidth = 500) +
+  ggtitle("Distribution of sample sequencing depth") + 
+  xlab("Read counts")  + ylab("Frequency")
+
+temppicosqrt <- transform_sample_counts(temppicofilt, function(x) sqrt(x / sum(x)))
+
+# Betadisper between lakes
+
+dfb = as(sample_data(temppicofilt), "data.frame")
+db = phyloseq::distance(temppicofilt, "jaccard", binary = FALSE)
+
+betab <- betadisper(db, dfb$Lake)
+betab
+permutest(betab)
+
+# Permanova between lakes
+
+synadonise = adonis(db ~ Lake, dfb)
+synadonise
+
+################################ (1) CROSS CORRELATIONS OF ALL LAKES ########################
+
+# Check cross-correlated variables with all lakes
+allsam = as(sample_data(temppicofilt), "data.frame")
+allsam <- select(allsam, -V1, -V1.1, -SampleID, 
+                 -Lake, -Opening, -Month, -Rep, 
+                 -Study, -Depth.bin, -Depth, -Light, -Isothermal, -Turbidity, -Abundance,
+                 -Secchi, -Chla, -TN, -Salinity)#, -Salinity)
+crosse = corr_cross(allsam, max_pvalue =0.05, top=10) # return only significant a=0.5 correlations
+
+# remove cross-correlated variables
+samplevegan = sample2veg(temppicofilt)
+samplevegan = samplevegan[,15:ncol(samplevegan)] 
+samplevegan[1] <- NULL 
+samplevegan[5] <- NULL 
+samplevegan[7:9] <- NULL 
+
+################################## (2) BIOENV OF ALL LAKES #####################################
+
+picotempREL  = transform_sample_counts(temppicofilt, function(x) x / sum(x) )
+
+otuvegan = otutoveg(temppicosqrt)
+otu<-subset(otuvegan,rowSums(otuvegan)!=0)
+oturel<-otu/rowSums(otu)
+
+keepvariables = which(sapply(sample_data(samplevegan), is.numeric))
+samp = data.frame(sample_data(samplevegan))[keepvariables]
+
+samplescale = scale(samp, center = TRUE, scale = TRUE)
+samplescale = as.data.frame(samplescale)
+
+bio = bioenv(otu ~ log(NH4) + log(TP) + log(DRP) + log(Temp) + log(DO.), 
+             samp, method = "spearman", index = "jaccard")
+bio
+
+###### correlations between lakes
+
+sam = as(sample_data(temppicofilt), "data.frame")
+sam <- select(sam, -V1, -V1.1, -SampleID, 
+                -Study, -Month, -Rep, -Light, -Depth, -Isothermal
+)
+
+sam1 = aggregate(sam[, 2:15], list(sam$Lake), mean)
+sam11 = sam %>%
+  group_by(Lake) %>%
+  summarise_at(vars(-Depth.bin, -Turbidity, -Opening), funs(mean(., na.rm=TRUE)))
+
+
+for (i in 1:length(sam11)) {
+  a <- cor.test(sam11$Abundance, sam11[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(sam11)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+################ (3) Constrained ordination of env variables and samples ###################
+
+la_not_na <- temppicosqrt %>%
+  subset_samples(
+    !is.na(TP)  &
+      !is.na(NH4)  &
+      !is.na(DO.)  &
+      !is.na(DRP) &
+      !is.na(Temp)
+  )
+
+jacel_not_na <- phyloseq::distance(physeq = la_not_na, method = "jaccard", binary = TRUE)
+
+# CAP ordinate
+cca_ord <- ordinate(
+  physeq = la_not_na, 
+  method = "CAP",
+  distance = jacel_not_na,
+  formula = ~
+    log(TP) + log(NH4) + log(DO.) +
+    log(DRP) +
+    log(Temp))
+
+cca_ord
+#summary(cca_ord)
+#spenvcor(cca_ord) # species-environment correlation
+
+vif.cca(cca_ord)
+
+cca_plot <- plot_ordination(la_not_na, cca_ord, color = "Lake") +
+  geom_point(aes(fill = Lake), size = 5) +
+  scale_color_manual(values = temp)  +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12, color = "black")) +
+  theme(axis.title.x = element_text(vjust = 0, size = 12),
+        axis.title.y = element_text(vjust = 2, size = 12))+
+  theme(legend.title = element_blank()) #+ scale_y_reverse()
+# geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2)
+#geom_text(data = taxdf, label="Genus",hjust=0, vjust=0))
+cca_plot
+
+arrowmat <- vegan::scores(cca_ord, display = "bp")
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+label_map <- aes(x =CAP1, # 1.3 * 
+                 y = CAP2, #1.3 * 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+arrowhead = arrow(length = unit(0.025, "npc"))
+
+cca_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "black", 
+    arrow = arrowhead
+  ) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) # +
+  geom_text_repel(
+    mapping = label_map, 
+    size = 4,  
+    data = arrowdf, 
+    show.legend = FALSE,
+  )# +
+theme(panel.border = element_blank()) +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+############## (4) Permutation test for significance of constraints. ##############################
+
+anova(cca_ord)
+anova(cca_ord, by="term", permutations=199)
+anova(cca_ord, by="axis", permutations=999)
+
+############################ (5) ENVIRONMENTAL BOXPLOTS ################################
+
+allsamplevegan = sample2veg(raretempcyanofilt1)
+#write.csv(allsamplevegan, file = "allsamplevegan.csv")
+boxplot_data = read.csv(file = "boxplot_dataNEW.csv")
+
+abund = boxplot_data[c("Lake","Abundance")]
+colon = boxplot_data[c("Lake","X..Colonial")]
+tn = boxplot_data[c("Lake","TN")]
+nh4 = boxplot_data
+nnn = boxplot_data[c("Lake","NNN")]
+sechi = boxplot_data[c("Lake","Secchi")]
+chla = boxplot_data[c("Lake","Chla")]
+tp = boxplot_data[c("Lake","TP")]
+do = boxplot_data[c("Lake","DO.")]
+temp = boxplot_data[c("Lake","Temp")]
+
+# Abundance
+box_long <- melt(tp, id = "Lake")                      
+head(box_long)  
+
+box_long$Lake <-
+  factor(box_long$Lake,
+         levels = c("Wan Epi", "Wan Hyp", "Wak Epi", "Wak Hyp", "Hay Epi","Hay Hyp","Toma", "Elles"))
+
+prettyLogs <- function(x){
+  pretty_range <- range(x[x > 0])
+  pretty_logs <- 10^(-10:10)
+  log_index <- which(pretty_logs < pretty_range[2] &
+                       pretty_logs > pretty_range[1])
+  log_index <- c(log_index[1]-1,log_index, log_index[length(log_index)]+1)
+  pretty_logs_new <-  pretty_logs[log_index]
+  return(pretty_logs_new)
+}
+breaks=prettyLogs
+
+# LOG PLOT
+
+ggplot(data = box_long, aes(x = Lake, y = value, color = Lake)) +
+  stat_boxplot(geom = "errorbar", width = 0.2) +
+  scale_y_log10(limits = c(0.001,1), breaks =prettyLogs)+ #trans_breaks("log10", function(x) 10^x),
+  #labels = trans_format("log10", math_format(10^.x)) + #, limits = c(1e2,1e8)) + #limits = c(1e2,1e8)
+  #scale_y_continuous(trans = 'log10', breaks =prettyLogs, name = "Abundance", limits = c(500,100000000)) +#, limits = c(0.001,0.2)) +  
+  #scale_y_continuous(name = "Temp", limits = c(4,24)) +  
+  annotation_logticks(sides="sides=l", size = 0.1) +
+  scale_x_discrete(name = "Lake", limits = c("Wan Epi", "Wan Hyp", "Wak Epi", "Wak Hyp", "Hay Epi","Hay Hyp","Toma", "Elles"),
+                   labels = c("Wan Epi", "Wan Hyp", "Wak Epi", "Wak Hyp", "Hay Epi","Hay Hyp","Toma", "Elles")) +      # Group label
+  #scale_y_continuous( name = "Secchi depth (m)") +
+  geom_boxplot(aes(color = Lake, fill = after_scale(desaturate(lighten(color, .3), .3))), size = 0.7) +
+  scale_color_manual(values = boxes2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, vjust = 1, hjust = 1),
+        axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())#,
+# panel.border = element_blank())
+
+#### NON LOG PLOTS
+
+ggplot(data = box_long, aes(x = Lake, y = value, color = Lake)) +
+  stat_boxplot(geom = "errorbar", width = 0.2) +
+  scale_y_log10(limits = c(0.03,5), breaks =prettyLogs)+ #trans_breaks("log10", function(x) 10^x),
+  #labels = trans_format("log10", math_format(10^.x)), name = "Cells/mL") + #, limits = c(1e2,1e8)) + #limits = c(1e2,1e8)
+  #scale_y_continuous(trans = 'log10', name = expression("TN" ~ (g/ ~ m^{3})), limits = c(0.01,4)) +#, limits = c(0.001,0.2)) +  
+  #scale_y_continuous( name = "TP (g/m3)") +  
+  annotation_logticks(sides="sides=l", size = 0.5) +
+  scale_x_discrete(name = "Lake", limits = c("Wan Epi", "Wan Hyp", "Wak Epi", "Wak Hyp", "Hay Epi","Hay Hyp","Toma", "Elles"),
+                   labels = c("Wan Epi", "Wan Hyp", "Wak Epi", "Wak Hyp", "Hay Epi","Hay Hyp","Toma", "Elles")) +      # Group label
+  scale_y_continuous( name = "Secchi depth (m)", limits = c(0,25)) +
+  geom_boxplot(aes(color = Lake, fill = after_scale(desaturate(lighten(color, .3), .3))), size = 0.7) +
+  scale_color_manual(values = boxes2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, vjust = 1, hjust = 1),
+        axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())#,
+# panel.border = element_blank())
+
+############################### plots for combined epi and hyp (e.g. Secchi)
+
+sech = allsamplevegan[c("Lake","Secchi")]
+chla = boxplot_data[c("Lake","Chla")]
+
+# Abundance
+box_long1 <- melt(sech, id = "Lake")   
+head(box_long1)  
+
+box_long1$Lake <-
+  factor(box_long1$Lake,
+         levels = c("Wanaka", "Wakatipu", "Hayes","Tomahawk", "Ellesmere"))
+
+ggplot(data = box_long1, aes(x = Lake, y = value, color = Lake)) +
+  stat_boxplot(geom = "errorbar", width = 0.2) +
+  scale_x_discrete(name = "Lake", limits = c("Wanaka", "Wakatipu", "Hayes", "Tomahawk", "Ellesmere"),
+                   labels = c("Wanaka", "Wakatipu", "Hayes", "Tomahawk","Ellesmere")) +      # Group label
+  scale_y_continuous( name = "Secchi depth (m)", limits = c(0,25)) +
+  geom_boxplot(aes(color = Lake, fill = after_scale(desaturate(lighten(color, .3), .3))), size = 0.7) +
+  scale_color_manual(values = temp) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, vjust = 1, hjust = 1),
+        axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2)) +
+  theme(plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())#,
+
+############################ (5b) ENVIRONMENTAL LINEGRAPHS ################################
+
+line_data = read.csv(file = "together_data_arranged.csv")
+
+El <- line_data %>% 
+  filter(Lake=="Ellesmere")
+# SINGLE
+El %>%
+  ggplot(aes(x=Month, y=X..colonial, group = Lake)) + # , group=Lake, color=Lake)) +
+  geom_line(color = "#E64B35FF", lwd = 2) +
+  geom_point(color = "black") +
+  scale_y_continuous(limits = c(0,100)) +
+  scale_x_discrete(limits = c("Feb-18", "Mar", "Apr", "May", "Jun","Jul","Aug", "Sep", "Oct","Nov","Dec","Jan","Feb-19"),
+                   labels = c("Feb-18", "Mar", "Apr", "May", "Jun","Jul","Aug", "Sep", "Oct","Nov","Dec","Jan","Feb-19")) +
+  theme_bw()+
+  theme(aspect.ratio=1/6)
+
+# GROUPED
+plot(1:10)
+dev.new(width=7,height=2,noRStudioGD = TRUE)
+p = El %>%
+  ggplot(aes(x=Month, y=DO., group = Depth, color=Depth)) + # , group=Lake, color=Lake)) +
+  geom_line(lwd = 2) +
+  geom_point(color = "black") +
+  scale_color_manual(values = c("#3C5488FF", "#8491B4FF"))+
+  scale_y_continuous(limits = c(0,120)) +
+  scale_x_discrete(limits = c("Feb-18", "Mar", "Apr", "May", "Jun","Jul","Aug", "Sep", "Oct","Nov","Dec","Jan","Feb-19"),
+                   labels = c("Feb-18", "Mar", "Apr", "May", "Jun","Jul","Aug", "Sep", "Oct","Nov","Dec","Jan","Feb-19")) +
+  theme_bw()
+
+plot(p)
+```
+
+SUBSETTING INDIVIDUAL LAKES
+
+```{r}
+############################ ----------- WANAKA ----------- ###################################
+
+wantemp = subset_samples(raretempcyanofilt1, Lake == "Wanaka")
+wantemp = subset_samples(wantemp, Depth == "Epi" |Depth == "Hyp")
+any(taxa_sums(wantemp) == 0)
+wantemp = prune_taxa(taxa_sums(wantemp) > 0, wantemp)
+ntaxa(wantemp)
+nsamples(wantemp)
+
+###########  ---- PICOCYANOS ------  ###########
+
+wapicotemp = subset_taxa(wantemp, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(wapicotemp) == 0)
+wapicotemp = prune_taxa(taxa_sums(wapicotemp) > 0, wapicotemp)
+ntaxa(wapicotemp)
+wantemppicosqrt <- transform_sample_counts(wapicotemp, function(x) sqrt(x / sum(x)))
+
+GP.ord=ordinate(wapicotemp, "PCoA", "jaccard", binary = FALSE) 
+synNMDS=plot_ordination(wantemppicosqrt, GP.ord, type="x.SampleID",  color="Month") # label = "Rep",
+synNMDS  + geom_point(size=4) + ggtitle("PCoA Wanaka picos")+theme_bw() 
+
+################ (1) Check for cross correlations in sample data ###################
+
+wansam = as(sample_data(wapicotemp), "data.frame")
+wansam <- select(wansam, -V1, -V1.1, -SampleID, 
+                 -Lake, -Opening, -Month,-Rep, -Depth.bin,
+                 -Study,  -Abundance, -X..Colonial, -Turbidity, -Light)#,
+                 -Salinity, -Chla, -NH4, -NNN, -DRP)
+crosse = corr_cross(wansam, max_pvalue =0.05, top=8) # return only significant a=0.5 correlations
+
+wasamplevegan = sample2veg(wapicotemp)
+wasamplevegan = wasamplevegan[,11:ncol(wasamplevegan)]
+wasamplevegan[2:3] <- NULL 
+wasamplevegan[4:5] <- NULL 
+wasamplevegan[6] <- NULL 
+wasamplevegan[5] <- NULL 
+wasamplevegan[7] <- NULL 
+wasamplevegan[8] <- NULL
+
+################ (2) Correlate abundances and env variables ###########################
+
+wansam = as(sample_data(wantempHYP), "data.frame")
+wansam <- select(wansam, -V1, -V1.1, -SampleID, 
+                 -Lake, -Opening, -Month,-Rep, 
+                 -Study, -Turbidity, -Salinity, -Depth, -Depth.bin)
+
+# Spearman Rank
+res2 <-cor.test(wansam$Abundance, wansam$Isothermal,  method = "spearman")
+res2
+
+# Do a loop
+
+for (i in 1:length(wansam)) {
+  a <- cor.test(wansam$Abundance, wansam[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(wansam)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+################ (3) Find best env variables to model #################################
+
+wapicotempREL  = transform_sample_counts(wapicotemp, function(x) x / sum(x) )
+waotuvegan = otutoveg(wapicotemp) 
+waotu<-subset(waotuvegan,rowSums(waotuvegan)!=0)
+
+# See if unimodal or linear response
+dec = decorana(waotu)
+print(dec)
+
+waoturel<-waotu/rowSums(waotu)
+
+keepvariables = which(sapply(sample_data(wasamplevegan), is.numeric))
+wasamp = data.frame(sample_data(wasamplevegan))[keepvariables]
+
+# Scale the environmental data 
+wasamplescale = scale(wasamp, center = TRUE, scale = TRUE)
+wasamplescale = as.data.frame(wasamplescale)
+
+biowa = bioenv(waoturel ~ log(TN)+log(TP)+ log(Temp)+ log(Secchi), 
+               wasamp, method = "spearman", index = "bray")
+
+################ (4) Constrained ordination of env variables and samples ###################
+
+wa_not_na <- wantemppicosqrt %>%
+  subset_samples(
+    !is.na(TP)  &
+      !is.na(Temp) &
+      !is.na(TN)  &
+      !is.na(Secchi)
+  )
+
+jacel_not_na <- phyloseq::distance(physeq = wa_not_na, method = "jaccard", binary = FALSE)
+
+# CAP ordinate
+cca_ord <- ordinate(
+  physeq = wa_not_na, 
+  method = "CAP",
+  distance = jacel_not_na,
+  formula = ~
+    log(TP) +
+    log(Temp) +
+    log(TN) +
+    log(Secchi)
+)
+
+cca_ord
+vif.cca(cca_ord)
+RsquareAdj(cca_ord)
+#summary(cca_ord)
+#spenvcor(cca_ord) # species-environment correlation
+
+## Just ASV's
+tax_table(wa_not_na) <- cbind(tax_table(wa_not_na), OTU = taxa_names(wa_not_na))
+plot_otus <- taxa_names(wa_not_na)[1:10]
+
+taxdf <- plot_ordination(wa_not_na, cca_ord, type="taxa", justDF = TRUE)
+
+##### TGet labels
+plot_ordination(wa_not_na, cca_ord, type="taxa", color="Genus") +
+  geom_point(size =5) + scale_color_manual(values = BigPallete)
+
+# Make months in correct order
+sample_data(wa_not_na)$Month <-
+  factor(sample_data(wa_not_na)$Month,
+         levels = c("Feb-18", "Apr", "May","Jun", "Jul", "Aug","Sep","Oct","Nov","Dec","Jan","Feb-19"))
+
+# CAP plot
+cca_plot <- plot_ordination(wa_not_na, cca_ord, color = "Month", shape = "Depth") +
+  scale_shape_manual(values=c(19, 15))+
+  geom_point(aes(fill = Month), size = 5) +
+  scale_color_manual(values = lena)  +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12, color = "black")) +
+  theme(axis.title.x = element_text(vjust = 0, size = 12),
+        axis.title.y = element_text(vjust = 2, size = 12))+
+  theme(legend.title = element_blank()) #+ scale_y_reverse()
+
+cca_plot = cca_plot + 
+  geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2) 
+
+arrowmat <- vegan::scores(cca_ord, display = "bp")
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+label_map <- aes(x =CAP1, # 1.3 * 
+                 y = CAP2, #1.3 * 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+arrowhead = arrow(length = unit(0.025, "npc"))
+
+cca_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "black", 
+    arrow = arrowhead
+  ) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic"))  +
+  
+  geom_text_repel(
+    mapping = label_map, 
+    size = 4,  
+    data = arrowdf, 
+    show.legend = FALSE,
+  ) 
+
+###################### Permutation test for significance of constraints.
+  
+anova(cca_ord)
+anova(cca_ord, by="term", permutations=199)
+anova(cca_ord, by="axis", permutations=499)
+
+############################## ---- EPILIMNION ------ #########################################
+
+# Just Epi Merged
+
+wantempEPI = subset_samples(wapicotemp, Depth == "Epi")
+any(taxa_sums(wantempEPI) == 0)
+wantempEPI = prune_taxa(taxa_sums(wantempEPI) > 0, wantempEPI)
+ntaxa(wantempEPI)
+nsamples(wantempEPI)
+
+wapicoEPItemp = subset_taxa(wantempEPI, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(wapicoEPItemp) == 0)
+wapicoEPItemp = prune_taxa(taxa_sums(wapicoEPItemp) > 0, wapicoEPItemp)
+ntaxa(wapicoEPItemp)
+
+wae2 <- tax_glom(wapicoEPItemp, taxrank = 'Genus') # agglomerate taxa
+wae3 <- transform_sample_counts(wae2, function(x) x/sum(x)) #get abundance in %
+wae4 <- psmelt(wae3) # create dataframe from phyloseq object
+wae4$Genus <- as.character(wae4$Genus) #convert to character
+wae4$Genus[wae4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(wae4$Month, level = c("Feb-18", "Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb-19"))
+
+p = ggplot(data=wae4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+##########################---- HYP ------##############################################
+wantempHYP = subset_samples(wapicotemp, Depth == "Hyp")
+any(taxa_sums(wantempHYP) == 0)
+wantempHYP = prune_taxa(taxa_sums(wantempHYP) > 0, wantempHYP)
+ntaxa(wantempHYP)
+nsamples(wantempHYP)
+
+####### just picos Hyp 
+
+wapicoHYPtemp = subset_taxa(wantempHYP, Order == "Synechococcales" | Order=="Thermosynechococcales")
+# "Mid 1") # & "M22" & "M23" & "M31" & "M32" & "M33"
+any(taxa_sums(wapicoHYPtemp) == 0)
+wapicoHYPtemp = prune_taxa(taxa_sums(wapicoHYPtemp) > 0, wapicoHYPtemp)
+ntaxa(wapicoHYPtemp)
+
+# plot relative abundance of taxa in merged phyloseq
+
+wah2 <- tax_glom(wapicoHYPtemp, taxrank = 'Genus') # agglomerate taxa
+wah3 <- transform_sample_counts(wah2, function(x) x/sum(x)) #get abundance in %
+wah4 <- psmelt(wah3) # create dataframe from phyloseq object
+wah4$Genus <- as.character(wah4$Genus) #convert to character
+wah4$Genus[wah4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(wah4$Month, level = c("Jun","Aug","Sep","Nov","Dec","Jan","Feb-19"))
+
+p = ggplot(data=wah4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+# 500 x 450
+# 600x300
+
+
+############################### PERMANOVA ON DEPTHS
+
+dfb = as(sample_data(wapicotemp), "data.frame")
+db = phyloseq::distance(wapicotemp, "jaccard", binary = FALSE)
+
+betab <- betadisper(db, dfb$Depth)
+betab
+permutest(betab)
+
+dfw = as(sample_data(wapicotemp), "data.frame")
+dw = phyloseq::distance(wapicotemp, "jaccard", binary = TRUE)
+synadonisWa = adonis(dw ~ Depth, dfw)
+synadonisWa
+
+perm <- how(nperm = 199)
+setBlocks(perm) <- with(dfw, Depth)
+# not using blocks no, just interactions
+adon2 = adonis2(dw ~ Isothermal + Depth*Isothermal, data = dfw)#, permutations = perm)
+adon2
+
+########################### -------- WAKATIPU --------- ##################################
+
+
+waktemp = subset_samples(raretempcyanofilt1, Lake == "Wakatipu")
+waktemp = subset_samples(waktemp, Depth == "Epi" |Depth == "Hyp")
+any(taxa_sums(waktemp) == 0)
+waktemp = prune_taxa(taxa_sums(waktemp) > 0, waktemp)
+ntaxa(waktemp)
+nsamples(waktemp)
+
+wkpicotemp = subset_taxa(waktemp, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(wkpicotemp) == 0)
+wkpicotemp = prune_taxa(taxa_sums(wkpicotemp) > 0, wkpicotemp)
+ntaxa(wkpicotemp)
+
+################ (1) Check for cross correlations in sample data ###################
+waksam = as(sample_data(wkpicotemp), "data.frame")
+waksam <- select(waksam, -V1, -V1.1, -SampleID, -Lake, 
+                 -Study, -Month, -Rep, -Opening,
+                 -Depth.bin, -Isothermal, -Abundance, -X..Colonial, 
+                 -Light, -Salinity, -Turbidity,
+                 -DO., -TN, -NH4, -NNN, -Chla)
+crosse = corr_cross(waksam, max_pvalue =0.05, top=12) # return only significant a=0.5 correlations
+crosse
+
+wakamplevegan = sample2veg(wkpicotemp)
+wakamplevegan = wakamplevegan[,11:ncol(wakamplevegan)]
+wakamplevegan[2:3] <- NULL 
+wakamplevegan[3:5] <- NULL 
+wakamplevegan[5] <- NULL 
+wakamplevegan[6:7] <- NULL ## 
+wakamplevegan[7] <- NULL
+
+################ (2) Correlate abundance and env variables ###########################
+
+# Spearman Rank
+res2 <-cor.test(waksam$Abundance, waksam$Isothermal,  method = "spearman")
+res2
+
+# Do a loop
+
+waksam = as(sample_data(wkpicoHYPtemp), "data.frame")
+waksam <- select(waksam, -V1, -V1.1, -SampleID, -Lake, 
+                 -Study, -Month, -Rep, -Opening, -Turbidity, -Salinity,
+                 - Depth, -Depth.bin
+)
+
+for (i in 1:length(waksam)) {
+  a <- cor.test(waksam$Abundance, waksam[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(waksam)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+################ (3) Find best env variables to model #################################
+waktemppicosqrt <- transform_sample_counts(wkpicotemp, function(x) sqrt(x / sum(x)))
+
+
+# Get relative abundances to trim those <1%
+wkpicotempREL  = transform_sample_counts(waktemppicosqrt, function(x) x / sum(x) )
+wkotuvegan = otutoveg(wkpicotemp) 
+wkotu<-subset(wkotuvegan,rowSums(wkotuvegan)!=0)
+dec = decorana(wkotu)
+print(dec)
+
+wkoturel<-wkotu/rowSums(wkotu)
+keepvariables = which(sapply(sample_data(wakamplevegan), is.numeric))
+wksamp = data.frame(sample_data(wakamplevegan))[keepvariables]
+
+wksamplescale = scale(wksamp, center = TRUE, scale = TRUE)
+wksamplescale = as.data.frame(wksamplescale)
+
+biowa = bioenv(wkotu ~., 
+               wksamp, method = "spearman", index = "bray")
+biowa
+
+################ (4) Constrained ordination of env variables and samples ###################
+
+wk_not_na <- waktemppicosqrt %>%
+  subset_samples(
+    !is.na(Isothermal)  &
+      !is.na(TP)  &
+      !is.na(Secchi)
+  )
+
+jacel_not_na <- phyloseq::distance(physeq = wk_not_na, method = "jaccard", binary = FALSE)
+
+# CAP ordinate
+cca_ord <- ordinate(
+  physeq = wk_not_na, 
+  method = "CAP",
+  distance = jacel_not_na,
+  formula = ~
+    Isothermal + TP +
+    Secchi 
+)
+
+cca_ord
+vif.cca(cca_ord)
+
+## Just ASV's
+tax_table(wk_not_na) <- cbind(tax_table(wk_not_na), OTU = taxa_names(wk_not_na))
+plot_otus <- taxa_names(wk_not_na)[1:10]
+
+taxdf <- plot_ordination(wk_not_na, cca_ord, type="taxa", justDF = TRUE)
+
+plot_ordination(wk_not_na, cca_ord, type="taxa", color="Genus") +
+  geom_point(size =5) +  scale_color_manual(values = BigPallete)  
+
+# Make months in correct order
+sample_data(wk_not_na)$Month <-
+  factor(sample_data(wk_not_na)$Month,
+         levels = c("Feb-18","Mar", "Apr", "May","Jun", "Jul", "Aug","Sep","Oct","Nov","Dec","Jan","Feb-19"))
+
+# CAP plot
+cca_plot <- plot_ordination(wk_not_na, cca_ord, color = "Month", shape = "Depth") +
+  scale_shape_manual(values=c(19, 15))+
+  geom_point(aes(fill = Month), size = 5) +
+  scale_color_manual(values = lena)  +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12, color = "black")) +
+  theme(axis.title.x = element_text(vjust = 0, size = 12),
+        axis.title.y = element_text(vjust = 2, size = 12))+
+  theme(legend.title = element_blank()) 
+
+cca_plot = cca_plot + 
+  geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2) 
+
+arrowmat <- vegan::scores(cca_ord, display = "bp")
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+label_map <- aes(x =CAP1, # 1.3 * 
+                 y = CAP2, #1.3 * 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+arrowhead = arrow(length = unit(0.025, "npc"))
+
+# Make a new graphic
+cca_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "black", 
+    arrow = arrowhead
+  ) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) # +
+
+geom_text_repel(
+  mapping = label_map, 
+  size = 4,  
+  data = arrowdf, 
+  show.legend = FALSE,
+) 
+
+############## Permutation test for significance of constraints.
+anova(cca_ord)
+anova(cca_ord, by="term", permutations=199)
+anova(cca_ord, by="axis", permutations=499)
+
+##########################  ------- EPI ------  ##############################################
+
+wkpicoEPItemp = subset_samples(wkpicotemp, Depth == "Epi")
+any(sample_sums(wkpicoEPItemp) == 0)
+wkpicoEPItemp = prune_samples(sample_sums(wkpicoEPItemp) > 0, wkpicoEPItemp)
+ntaxa(wkpicoEPItemp)
+
+wke2 <- tax_glom(wkpicoEPItemp, taxrank = 'Genus') # agglomerate taxa
+wke3 <- transform_sample_counts(wke2, function(x) x/sum(x)) #get abundance in %
+wke4 <- psmelt(wke3) # create dataframe from phyloseq object
+wke4$Genus <- as.character(wke4$Genus) #convert to character
+wke4$Genus[wke4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(wke4$Month, level = c("Mar","Apr","May","Sep","Dec","Jan","Feb-19"))
+
+p = ggplot(data=wke4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+##########################  ------- HYP ------  ##############################################
+
+waktempHYP = subset_samples(waktemp, Depth == "Hyp")
+any(taxa_sums(waktempHYP) == 0)
+waktempHYP = prune_taxa(taxa_sums(waktempHYP) > 0, waktempHYP)
+ntaxa(waktempHYP)
+nsamples(waktempHYP)
+
+wkpicoHYPtemp = subset_taxa(waktempHYP, Order == "Synechococcales" | Order=="Thermosynechococcales")
+# "Mid 1") # & "M22" & "M23" & "M31" & "M32" & "M33"
+any(taxa_sums(wkpicoHYPtemp) == 0)
+wkpicoHYPtemp = prune_taxa(taxa_sums(wkpicoHYPtemp) > 0, wkpicoHYPtemp)
+ntaxa(wkpicoHYPtemp)
+
+wkh2 <- tax_glom(wkpicoHYPtemp, taxrank = 'Genus') # agglomerate taxa
+wkh3 <- transform_sample_counts(wkh2, function(x) x/sum(x)) #get abundance in %
+wkh4 <- psmelt(wkh3) # create dataframe from phyloseq object
+wkh4$Genus <- as.character(wkh4$Genus) #convert to character
+wkh4$Genus[wkh4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(wkh4$Month, level = c("May","Jul","Aug","Sep","Nov","Jan","Feb-19"))
+
+p= ggplot(data=wkh4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+############################### PERMANOVA ON DEPTHS
+
+dfb = as(sample_data(wkpicotemp), "data.frame")
+db = phyloseq::distance(wkpicotemp, "jaccard", binary = TRUE)
+
+betab <- betadisper(db, dfb$Depth)
+betab
+permutest(betab)
+
+dfw = as(sample_data(wkpicotemp), "data.frame")
+dw = phyloseq::distance(wkpicotemp, "jaccard", binary = FALSE)
+synadonisWa = adonis(dw ~ Depth, dfw)
+synadonisWa
+
+# perm <- how(nperm = 199)
+# setBlocks(perm) <- with(dfw, Depth)
+# adonis2(dw ~ Isothermal, data = dfw, , strata = permutations = perm)=
+
+############# ----------------  Ellesmere Temporal --------------------------- ###############
+
+eltemp = subset_samples(raretempcyanofilt1, Lake == "Ellesmere")
+any(taxa_sums(eltemp) == 0)
+eltemp = prune_taxa(taxa_sums(eltemp) > 0, eltemp)
+ntaxa(eltemp)
+nsamples(eltemp)
+
+##########################  ------- PICOS ------  ##############################################
+elpicotemp = subset_taxa(eltemp, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(elpicotemp) == 0)
+elpicotemp = prune_taxa(taxa_sums(elpicotemp) > 0, elpicotemp)
+ntaxa(elpicotemp)
+
+GP.ord=ordinate(elpicotemp, "NMDS", "jaccard", binary = FALSE) 
+synNMDS=plot_ordination(elpicotemp, GP.ord, type="x.SampleID",  color="Opening") # label = "Rep",
+synNMDS  + geom_point(size=4) +
+ # scale_color_manual(values=scale_months) +
+ # scale_fill_manual(values=scale_months) +
+  geom_point(size=4) + 
+  #geom_polygon(aes(fill=Rep), alpha = 0.75) +
+  theme_bw() 
+
+el2 <- tax_glom(elpicotemp, taxrank = 'Genus') # agglomerate taxa
+el3 <- transform_sample_counts(el2, function(x) x/sum(x)) #get abundance in %
+el4 <- psmelt(el3) # create dataframe from phyloseq object
+el4$Genus <- as.character(el4$Genus) #convert to character
+el4$Genus[el4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(el4$Month, level = c("Feb-18","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Dec","Jan","Feb-19"))
+
+p = ggplot(data=el4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+################ (1) Check for cross correlations in sample data ###################
+
+elsam = as(sample_data(elpicotemp), "data.frame")
+elsam <- select(elsam, -V1, -V1.1, -SampleID, -Lake, 
+                -Study, -Month, -Rep, 
+                -X..Colonial, -Depth, -Depth.bin, -Isothermal, -Abundance,
+                -TN, -Turbidity, -Secchi)
+crosse = corr_cross(elsam, max_pvalue =0.05, top=5) # return only significant a=0.5 correlations
+crosse
+
+elsamplevegan = sample2veg(elpicotemp)
+elsamplevegan = elsamplevegan[,12:ncol(elsamplevegan)]
+elsamplevegan[1:4] <- NULL 
+elsamplevegan[9:10] <- NULL 
+
+################ (2) Correlate abundance and env variables ###########################
+
+# Spearman Rank
+res2 <-cor.test(tomsam$Abundance, tomsam$Isothermal,  method = "spearman")
+res2
+
+# Do a loop
+
+elsam = as(sample_data(elpicotemp), "data.frame")
+elsam <- select(elsam, -V1, -V1.1, -SampleID, -Lake, 
+                -Study, -Month, -Rep, -Light, -Depth, -Isothermal
+)
+
+for (i in 1:length(elsam)) {
+  a <- cor.test(elsam$Abundance, elsam[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(elsam)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+################ (3) Find best env variables to model #################################
+
+eltemppicosqrt <- transform_sample_counts(elpicotemp, function(x) sqrt(x / sum(x)))
+elotuvegan = otutoveg(eltemppicosqrt)
+elotu<-subset(elotuvegan,rowSums(elotuvegan)!=0)
+
+dec = decorana(elotu)
+print(dec)
+
+eloturel<-elotu/rowSums(elotu)
+
+keepvariables = which(sapply(sample_data(elsamplevegan), is.numeric))
+elsamp = data.frame(sample_data(elsamplevegan))[keepvariables]
+
+elsamplescale = scale(elsamp, center = TRUE, scale = TRUE)
+elsamplescale = as.data.frame(elsamplescale)
+
+# Choose which ones and call them (all that aren't cross-correlated)
+biowa = bioenv(elotu ~ DO. + Salinity, 
+               elsamp, method = "spearman", index = "bray")
+biowa
+
+################ (4) Constrained ordination of env variables and samples ###################
+
+el_not_na <- eltemppicosqrt %>%
+  subset_samples(
+    !is.na(DO.) &
+      !is.na(Salinity))
+
+jacel_not_na <- phyloseq::distance(physeq = el_not_na, method = "jaccard", binary = FALSE)
+
+# CAP ordinate
+cca_ord <- ordinate(
+  physeq = el_not_na, 
+  method = "CAP",
+  distance = jacel_not_na,
+  formula = ~  DO. + Salinity )
+
+cca_ord
+
+vif.cca(cca_ord)
+
+taxdf <- plot_ordination(el_not_na, cca_ord, type="taxa", justDF = TRUE)
+
+plot_ordination(el_not_na, cca_ord, type="taxa", color="Genus") +
+  geom_point(size =5) + scale_color_manual(values = BigPallete) + geom_jitter()
+
+sample_data(el_not_na)$Month <-
+  factor(sample_data(el_not_na)$Month,
+         levels = c("Feb-18", "Mar","Apr", "May","Jun", "Jul", "Aug","Sep","Oct","Nov","Dec","Jan","Feb-19"))
+
+# CAP plot
+cca_plot <- plot_ordination(el_not_na, cca_ord, color = "Month") +
+  geom_point(aes(fill = Month), size = 5) +
+  scale_color_manual(values = lena)  +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12, color = "black")) +
+  theme(axis.title.x = element_text(vjust = 0, size = 12),
+        axis.title.y = element_text(vjust = 2, size = 12))+
+  theme(legend.title = element_blank()) 
+
+cca_plot = cca_plot + 
+  geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2) 
+
+
+arrowmat <- vegan::scores(cca_ord, display = "bp")
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+label_map <- aes(x =CAP1, # 1.3 * 
+                 y = CAP2, #1.3 * 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+arrowhead = arrow(length = unit(0.025, "npc"))
+
+cca_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "black", 
+    arrow = arrowhead
+  ) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) # +
+  geom_text_repel(
+    mapping = label_map, 
+    size = 4,  
+    data = arrowdf, 
+    show.legend = FALSE,
+  ) 
+
+############## Permutation test for significance of constraints.
+
+anova(cca_ord) 
+anova(cca_ord, by="term", permutations=199)
+anova(cca_ord, by="axis", permutations=499)
+
+
+############# ----------------  Hayes Temporal --------------------------- ###############
+
+hytemp = subset_samples(raretempcyanofilt1, Lake == "Hayes")
+any(taxa_sums(hytemp) == 0)
+hytemp = prune_taxa(taxa_sums(hytemp) > 0, hytemp)
+ntaxa(hytemp)
+nsamples(hytemp)
+
+GP.ord=ordinate(hytemp, "PCoA", "jaccard", binary = FALSE) 
+synNMDS=plot_ordination(hytemp, GP.ord, type="x.SampleID",  color="Depth.bin") # label = "Rep",
+synNMDS  + geom_point(size=4) #+
+scale_color_manual(values=scale_months) +
+  scale_fill_manual(values=scale_months) +
+  geom_point(size=4) + 
+  #geom_polygon(aes(fill=Rep), alpha = 0.75) +
+  theme_bw() 
+
+hytemppicos = subset_taxa(hytemp, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(hytemppicos) == 0)
+hytemppicos = prune_taxa(taxa_sums(hytemppicos) > 0, hytemppicos)
+any(sample_sums(hytemppicos) == 0)
+hytemppicos = prune_samples(sample_sums(hytemppicos) > 0, hytemppicos)
+ntaxa(hytemppicos)
+
+haytemppicosqrt <- transform_sample_counts(hytemppicos, function(x) sqrt(x / sum(x)))
+
+############################### PERMANOVA ON DEPTHS
+
+dfw = as(sample_data(hytemppicos), "data.frame")
+dw = phyloseq::distance(hytemppicos, "jaccard", binary = FALSE)
+synadonisWa = adonis2(dw ~ Depth, dfw)
+synadonisWa
+
+perm <- how(nperm = 199)
+setBlocks(perm) <- with(dfw, Depth)
+adonis2(dw ~ Isothermal, data = dfw, permutations = perm)
+
+
+dfb = as(sample_data(hytemppicos), "data.frame")
+db = phyloseq::distance(hytemppicos, "jaccard", binary = FALSE)
+
+betab <- betadisper(db, dfb$Depth)
+betab
+permutest(betab)
+
+##### Check for cross correlations in sample data
+
+haysam = as(sample_data(hytemppicos), "data.frame")
+haysam1 <- select(haysam, -V1, -V1.1, -SampleID, -Lake, 
+                  -Study, -Month, -Rep, -Opening, 
+                  -X..Colonial, -Depth, -Isothermal, -Abundance,
+                  -Salinity, -Light, -TP, -TN, -DRP, -NH4, -Temp)#-NNN, -NH4, -TP, -Chla, -DO., -DRP)
+crosse = corr_cross(haysam1, max_pvalue =0.05, top=15) # return only significant a=0.5 correlations
+crosse
+
+
+hasamplevegan = sample2veg(hytemppicos)
+hasamplevegan = hasamplevegan[,16:ncol(hasamplevegan)]
+hasamplevegan[1] <- NULL 
+hasamplevegan[2:3] <- NULL 
+hasamplevegan[4] <- NULL #
+hasamplevegan[4] <- NULL 
+hasamplevegan[5] <- NULL 
+
+################ (3) Find best env variables to model #################################
+
+hyotuvegan = otutoveg(haytemppicosqrt)
+hyotu<-subset(hyotuvegan,rowSums(hyotuvegan)!=0)
+
+dec = decorana(hyotu)
+print(dec)
+
+hyoturel<-hyotu/rowSums(hyotu)
+
+keepvariables = which(sapply(sample_data(hasamplevegan), is.numeric))
+hysamp = data.frame(sample_data(hasamplevegan))[keepvariables]
+
+hysamplescale = scale(hysamp, center = TRUE, scale = TRUE)
+hysamplescale = as.data.frame(hysamplescale)
+
+biowa = bioenv(hyoturel ~ ., 
+               hysamplescale, method = "spearman", index = "bray")
+
+################## CCA of env variables constraining samples (months)
+
+hy_not_na <- haytemppicosqrt %>%
+  subset_samples(
+    !is.na(Secchi) &
+      !is.na(DO.)) 
+
+jacel_not_na <- phyloseq::distance(physeq = hy_not_na, method = "jaccard", binary = FALSE)
+
+# CAP ordinate
+cca_ord <- ordinate(
+  physeq = hy_not_na, 
+  method = "CAP",
+  distance = jacel_not_na,
+  formula = ~ Secchi + DO.)
+
+cca_ord
+vif.cca(cca_ord)
+taxdf <- plot_ordination(hy_not_na, cca_ord, type="taxa", justDF = TRUE)
+
+plot_ordination(hy_not_na, cca_ord, type="taxa", color="Genus") +
+  geom_point(size =5) + scale_color_manual(values = BigPallete) + geom_jitter(width = 1)
+
+
+sample_data(hy_not_na)$Month <-
+  factor(sample_data(hy_not_na)$Month,
+         levels = c("Feb-18", "Mar","Apr", "May","Jun", "Jul", "Aug","Sep","Oct","Nov","Dec","Jan","Feb-19"))
+
+# CAP plot
+cca_plot <- plot_ordination(hy_not_na, cca_ord, color = "Month", shape = "Depth") +
+  scale_shape_manual(values=c(19, 15))+
+  geom_point(aes(fill = Month), size = 5) +
+  scale_color_manual(values = lena)  +
+  theme_bw() + 
+  theme(axis.title = element_text(size = 12, color = "black")) +
+  theme(axis.title.x = element_text(vjust = 0, size = 12),
+        axis.title.y = element_text(vjust = 2, size = 12))+
+  theme(legend.title = element_blank()) #+ scale_y_reverse()
+
+cca_plot = cca_plot + 
+  geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2) 
+
+arrowmat <- vegan::scores(cca_ord, display = "bp")
+arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+arrow_map <- aes(xend = CAP1, 
+                 yend = CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+label_map <- aes(x =CAP1, # 1.3 * 
+                 y = CAP2, #1.3 * 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+
+arrowhead = arrow(length = unit(0.025, "npc"))
+
+cca_plot + 
+  geom_segment(
+    mapping = arrow_map, 
+    size = .5, 
+    data = arrowdf, 
+    color = "black", 
+    arrow = arrowhead
+  ) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(axis.title = element_text(size = 12, color = "black",
+                                  face = "italic")) # +
+  geom_text_repel(
+    mapping = label_map, 
+    size = 4,  
+    data = arrowdf, 
+    show.legend = FALSE,
+  ) 
+
+
+############## Permutation test for significance of constraints.
+
+anova(cca_ord) 
+anova(cca_ord, by="term", permutations=199)
+anova(cca_ord, by="axis", permutations=499)
+
+############   Correlation of abundance and environmental variables ###############
+
+# Spearman Rank
+res2 <-cor.test(haysam$Abundance, haysam$Isothermal,  method = "spearman")
+res2
+
+# Do a loop
+
+haysam = as(sample_data(hytempHYP), "data.frame")
+haysam <- select(haysam, -V1, -V1.1, -SampleID, -Lake, 
+                 -Study, -Month, -Rep, -Opening, -Salinity, -Light, -Depth, -Depth.bin,
+                 -X..Colonial, -Turbidity
+)
+
+for (i in 2:length(haysam)) {
+  a <- cor.test(haysam$Abundance, haysam[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(haysam)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+##########################  ------- EPI ------  ##############################################
+
+hytempEPI = subset_samples(hytemp, Depth == "Epi")
+any(taxa_sums(hytempEPI) == 0)
+hytempEPI = prune_taxa(taxa_sums(hytempEPI) > 0, hytempEPI)
+ntaxa(hytempEPI)
+nsamples(hytempEPI)
+
+y2 <- tax_glom(hytempEPI, taxrank = 'Family') # agglomerate taxa
+y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+y4 <- psmelt(y3) # create dataframe from phyloseq object
+y4$Family <- as.character(y4$Family) #convert to character
+y4$Family[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(y4$Month, level = c("Feb-18","May","Jun","Jan","Feb-19")) # "Feb 18","Jun",
+
+p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Family)) 
+p + geom_bar(aes(), stat="identity",position="Stack", color = "black") +
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Order") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = cyanofamily) 
+
+#### EPI PICO PLOT
+
+hytemppicoEPI = subset_samples(hytemppicos, Depth == "Epi")
+any(taxa_sums(hytemppicoEPI) == 0)
+hytemppicoEPI = prune_taxa(taxa_sums(hytemppicoEPI) > 0, hytemppicoEPI)
+ntaxa(hytemppicoEPI)
+nsamples(hytemppicoEPI)
+
+y2 <- tax_glom(hytemppicoEPI, taxrank = 'Genus') # agglomerate taxa
+y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+y4 <- psmelt(y3) # create dataframe from phyloseq object
+y4$Genus <- as.character(y4$Genus) #convert to character
+y4$Genus[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(y4$Month, level = c("Feb-18","May","Jun","Jan","Feb-19")) # "Feb 18","Jun",
+
+p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+##########################  ------- HYP ------  ##############################################
+
+hytempHYP = subset_samples(hytemp, Depth == "Hyp")
+any(taxa_sums(hytempHYP) == 0)
+hytempHYP = prune_taxa(taxa_sums(hytempHYP) > 0, hytempHYP)
+ntaxa(hytempHYP)
+nsamples(hytempHYP)
+
+y2 <- tax_glom(hytempHYP, taxrank = 'Family') # agglomerate taxa
+y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+y4 <- psmelt(y3) # create dataframe from phyloseq object
+y4$Family <- as.character(y4$Family) #convert to character
+y4$Family[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(y4$Month, level = c("Feb-18","May","Jun","Jan","Feb-19")) # "Feb 18","Jun",
+
+p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Family)) 
+p + geom_bar(aes(), stat="identity",position="Stack", color = "black") +
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Order") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = cyanofamily) 
+
+##### PICO PLOT
+
+hytempHYP = subset_samples(hytemppicos, Depth == "Hyp")
+any(taxa_sums(hytempHYP) == 0)
+hytempHYP = prune_taxa(taxa_sums(hytempHYP) > 0, hytempHYP)
+ntaxa(hytempHYP)
+nsamples(hytempHYP)
+
+y2 <- tax_glom(hytempHYP, taxrank = 'Genus') # agglomerate taxa
+y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+y4 <- psmelt(y3) # create dataframe from phyloseq object
+y4$Genus <- as.character(y4$Genus) #convert to character
+y4$Genus[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+#Changing x axis to correct monthly order (have to turn into a factor)
+level_order <- factor(y4$Month, level = c("May","Jan","Feb-19")) 
+
+p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Genus)) 
+p + geom_bar(aes(), stat="identity",position="Stack")+ #, color = "black") 
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = good_palette) 
+
+###################### --------------- TOMAHAWK ---------------#######################################
+
+totemp= subset_samples(raretempcyanofilt1, Lake == "Tomahawk")
+#waktempunrare = subset_samples(waktempunrare, Depth == "Epi" |Depth == "Hyp")
+any(taxa_sums(totemp) == 0)
+totemp = prune_taxa(taxa_sums(totemp) > 0, totemp)
+ntaxa(totemp)
+nsamples(totemp)
+
+# Just Epi Merging
+
+totempEPI = subset_samples(totemp, Depth.bin == "1")
+any(taxa_sums(totempEPI) == 0)
+totempEPI = prune_taxa(taxa_sums(totempEPI) > 0, totempEPI)
+ntaxa(totempEPI)
+nsamples(totempEPI)
+
+##################### just picos Epi
+
+topicoEPItemp = subset_taxa(totempEPI, Order == "Synechococcales" | Order=="Thermosynechococcales")
+any(taxa_sums(topicoEPItemp) == 0)
+topicoEPItemp = prune_taxa(taxa_sums(topicoEPItemp) > 0, topicoEPItemp)
+ntaxa(topicoEPItemp)
+
+##### Check for cross correlations in sample data
+
+tomsam = as(sample_data(topicoEPItemp), "data.frame")
+tomsam <- select(tomsam, -V1, -V1.1, -SampleID, -Lake, 
+                 -Study, -Month, -Rep, -Opening, -Depth.bin, 
+                 -X..Colonial, -Depth, -Isothermal, -Abundance, -Turbidity, -Secchi, -Light,
+                 -Chla, -DO., -Temp, -Salinity, -TP)
+crosse = corr_cross(tomsam, max_pvalue =0.05, top=15) # return only significant a=0.5 correlations
+crosse
+
+tosamplevegan = sample2veg(topicoEPItemp)
+tosamplevegan = tosamplevegan[,15:ncol(tosamplevegan)]
+tosamplevegan[1] <- NULL # TP
+tosamplevegan[3] <- NULL #chla temp
+tosamplevegan[4:5] <- NULL 
+tosamplevegan[5:7] <- NULL 
+
+############   Correlation of abundance and environmental variables ###############
+
+# Spearman Rank
+res2 <-cor.test(tomsam$Abundance, tomsam$Isothermal,  method = "spearman")
+res2
+
+# Do a loop
+
+tomsam = as(sample_data(topicoEPItemp), "data.frame")
+tomsam <- select(tomsam, -V1, -V1.1, -SampleID, -Lake, 
+                 -Study, -Month, -Rep, -Opening, -Salinity, -Light,
+                 -Depth, -Depth.bin, -Isothermal, -Turbidity, -Secchi
+)
+
+for (i in 2:length(tomsam)) {
+  a <- cor.test(tomsam$X..Colonial, tomsam[,i], method = "spearman", exact = FALSE)
+  print(paste(colnames(tomsam)[i], " rho:", a$estimate, " p=value:", a$p.value))
+}
+
+y2 <- tax_glom(totempEPI, taxrank = 'Order') # agglomerate taxa
+y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+y4 <- psmelt(y3) # create dataframe from phyloseq object
+y4$Order <- as.character(y4$Order) #convert to character
+y4$Order[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+
+level_order <- factor(y4$Month, level = c("May","Jun","Jul","Aug","Dec","Jan"))
+
+p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Order)) 
+p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+  theme_bw() +  
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), panel.border = element_blank()) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+  labs(x = "", y = "Relative abundance (%)", fill = "Order") +
+  theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+        axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+  theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+  scale_fill_manual(values = cyanoorder) 
+
+
+###### PICO BAR
+
+  y2 <- tax_glom(totempEPI, taxrank = 'Genus') # agglomerate taxa
+  y3 <- transform_sample_counts(y2, function(x) x/sum(x)) #get abundance in %
+  y4 <- psmelt(y3) # create dataframe from phyloseq object
+  y4$Genus <- as.character(y4$Genus) #convert to character
+  y4$Genus[y4$Abundance < 0.01] <- "Species < 1% abund." #rename genera with < 1% abundance
+  
+  #Changing x axis to correct monthly order (have to turn into a factor)
+  level_order <- factor(y4$Month, level = c("May","Jun","Jul","Aug","Dec","Jan"))
+  
+  p = ggplot(data=y4, aes(x=level_order, y=Abundance, fill=Genus)) 
+  p + geom_bar(aes(), stat="identity",position="Stack") + #, color = "black")
+    theme_bw() +  
+    theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(), panel.border = element_blank()) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust = 1)) + 
+    labs(x = "", y = "Relative abundance (%)", fill = "Taxa") +
+    theme(axis.title.x = element_text(size = 12, color = "black",face = "italic", vjust = 0),
+          axis.title.y = element_text(size = 12, color = "black",face = "italic", vjust = 2))+
+    theme(legend.title = element_text(size = 11, color = "black",face = "italic")) +
+    scale_fill_manual(values = BigPallete) #good_palette
+  
+################ (3) Find best env variables to model #################################
+totemppicosqrt <- transform_sample_counts(topicoEPItemp, function(x) sqrt(x / sum(x)))
+
+topicotempREL  = transform_sample_counts(topicoEPItemp, function(x) x / sum(x) )
+tootuvegan = otutoveg(topicoEPItemp)
+tootu<-subset(tootuvegan,rowSums(tootuvegan)!=0)
+dec = decorana(tootu)
+print(dec)
+tooturel<-tootu/rowSums(tootu)
+keepvariables = which(sapply(sample_data(tosamplevegan), is.numeric))
+tosamp = data.frame(sample_data(tosamplevegan))[keepvariables]
+  
+tosamplescale = scale(tosamp, center = TRUE, scale = TRUE)
+tosamplescale = as.data.frame(tosamplescale)
+  
+bioto = bioenv(tooturel ~ ., 
+                 tosamplescale, method = "spearman", index = "bray")
+bioto
+
+################ (4) Constrained ordination of env variables and samples ###################
+  to_not_na <- topicoEPItemp %>%
+    subset_samples(
+        !is.na(TN) &
+        !is.na(NH4) )
+  
+  jacel_not_na <- phyloseq::distance(physeq = to_not_na, method = "jaccard", binary = FALSE)
+  
+  # CAP ordinate
+  cca_ord <- ordinate(
+    physeq = to_not_na, 
+    method = "CAP",
+    distance = jacel_not_na,
+    formula = ~  TN + NH4)
+  
+  cca_ord
+  vif.cca(cca_ord)
+
+  taxdf <- plot_ordination(to_not_na, cca_ord, type="taxa", justDF = TRUE)
+  
+  plot_ordination(to_not_na, cca_ord, type="taxa", color="Genus") +
+    geom_point(size =5) + scale_color_manual(values = BigPallete) 
+  
+  sample_data(to_not_na)$Month <-
+    factor(sample_data(to_not_na)$Month,
+           levels = c("May","Jun", "Jul", "Aug","Dec","Jan"))
+  
+  # CAP plot
+  cca_plot <- plot_ordination(to_not_na, cca_ord, color = "Month") +
+    geom_point(aes(fill = Month), size = 5) +
+    scale_color_manual(values = lena)  +
+    theme_bw() + 
+    theme(axis.title = element_text(size = 12, color = "black")) +
+    theme(axis.title.x = element_text(vjust = 0, size = 12),
+          axis.title.y = element_text(vjust = 2, size = 12))+
+    theme(legend.title = element_blank()) 
+  
+  cca_plot
+  
+  cca_plot = cca_plot + 
+    geom_point(data = taxdf,  shape = 17, fill = "darkblue",  color = "black", size = 2) 
+  
+  cca_plot
+  
+  arrowmat <- vegan::scores(cca_ord, display = "bp")
+  arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+  arrow_map <- aes(xend = CAP1, 
+                   yend = CAP2, 
+                   x = 0, 
+                   y = 0, 
+                   shape = NULL, 
+                   color = NULL, 
+                   label = labels)
+  
+  label_map <- aes(x =CAP1, # 1.3 * 
+                   y = CAP2, #1.3 * 
+                   shape = NULL, 
+                   color = NULL, 
+                   label = labels)
+  
+  arrowhead = arrow(length = unit(0.025, "npc"))
+
+  cca_plot + 
+    geom_segment(
+      mapping = arrow_map, 
+      size = .5, 
+      data = arrowdf, 
+      color = "black", 
+      arrow = arrowhead
+    ) + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    theme(axis.title = element_text(size = 12, color = "black",
+                                    face = "italic"))  #+
+    geom_text_repel(
+      mapping = label_map, 
+      size = 4,  
+      data = arrowdf, 
+      show.legend = FALSE,
+    ) 
+  
+  ############## Permutation test for significance of constraints.
+  anova(cca_ord) 
+  anova(cca_ord, by="term", permutations=199)
+  anova(cca_ord, by="axis", permutations=499)
+
+```
+
